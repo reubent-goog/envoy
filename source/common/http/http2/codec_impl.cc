@@ -137,6 +137,8 @@ public:
   const absl::string_view oghttp2_err_unknown_ = "http2.unknown.oghttp2.error";
   // The number of headers (or trailers) exceeded the configured limits
   const absl::string_view too_many_headers = "http2.too_many_headers";
+  // The total size of headers exceeded the configured limits
+  const absl::string_view header_list_size_too_large = "http2.header_list_size_too_large";
   // Envoy detected an HTTP/2 frame flood from the server.
   const absl::string_view outbound_frame_flood = "http2.outbound_frames_flood";
   // Envoy detected an inbound HTTP/2 frame flood.
@@ -1661,16 +1663,19 @@ int ConnectionImpl::saveHeader(int32_t stream_id, HeaderString&& name, HeaderStr
   }
 
   stream->saveHeader(std::move(name), std::move(value));
-
-  if (stream->headers().byteSize() > max_headers_kb_ * 1024 ||
-      stream->headers().size() > max_headers_count_) {
+  if (stream->headers().byteSize() > max_headers_kb_ * 1024) {
+    stream->setDetails(Http2ResponseCodeDetails::get().header_list_size_too_large);
+    stats_.header_list_size_too_large_.inc();
+    // This will cause the library to reset/close the stream.
+    return ERR_TEMPORAL_CALLBACK_FAILURE;
+  }
+  if (stream->headers().size() > max_headers_count_) {
     stream->setDetails(Http2ResponseCodeDetails::get().too_many_headers);
     stats_.header_overflow_.inc();
     // This will cause the library to reset/close the stream.
     return ERR_TEMPORAL_CALLBACK_FAILURE;
-  } else {
-    return 0;
   }
+  return 0;
 }
 
 Status ConnectionImpl::sendPendingFrames() {

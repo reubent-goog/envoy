@@ -274,6 +274,8 @@ public:
   // Headers are directly encoded
   void appendStaticHeader(StaticHeaderIndex index);
   void appendHeaderWithoutIndexing(StaticHeaderIndex index, absl::string_view value);
+  void appendHeaderWithIncrementalIndexing(StaticHeaderIndex index, absl::string_view value);
+  void appendIndexedHeader(uint32_t index);
 
 private:
   void buildHeader(Type type, uint32_t payload_size = 0, uint8_t flags = 0, uint32_t stream_id = 0);

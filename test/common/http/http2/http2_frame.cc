@@ -118,6 +118,20 @@ void Http2Frame::appendHeaderWithoutIndexing(const Header& header) {
   appendData(header.value_);
 }
 
+void Http2Frame::appendHeaderWithIncrementalIndexing(StaticHeaderIndex index, absl::string_view value) {
+  size_t start_size = data_.size();
+  appendHpackInt(static_cast<uint8_t>(index), 0x3f);
+  data_[start_size] |= 0x40;
+  appendHpackInt(value.size(), 0x7f);
+  appendData(value);
+}
+
+void Http2Frame::appendIndexedHeader(uint32_t index) {
+  size_t start_size = data_.size();
+  appendHpackInt(index, 0x7f);
+  data_[start_size] |= 0x80;
+}
+
 void Http2Frame::appendEmptyHeader() {
   data_.push_back(0x40);
   data_.push_back(0x00);

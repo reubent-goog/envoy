@@ -1609,4 +1609,68 @@ TEST_P(Http2FloodMitigationTest, HeadersContinuationObservesLimit) {
   EXPECT_EQ(1, test_server_->counter("http2.header_overflow")->value());
 }
 
+TEST_P(Http2FloodMitigationTest, HpackCookieBomb) {
+  useAccessLog("%RESPONSE_FLAGS% %RESPONSE_CODE_DETAILS%");
+  uint32_t max_headers_kb = 4;
+  config_helper_.addConfigModifier(
+      [&](envoy::extensions::filters::network::http_connection_manager::v3::
+              HttpConnectionManager& hcm) -> void {
+        hcm.mutable_max_request_headers_kb()->set_value(max_headers_kb);
+      });
+  beginSession();
+
+  // Stream 1: Setup dynamic table with large cookie.
+  const uint32_t request_stream_id = Http2Frame::makeClientStreamId(0);
+  uint8_t setup_flags = orFlags(Http2Frame::HeadersFlags::EndHeaders,
+                                Http2Frame::HeadersFlags::EndStream);
+  auto setup_frame = Http2Frame::makeEmptyHeadersFrame(request_stream_id, static_cast<Http2Frame::HeadersFlags>(setup_flags));
+  setup_frame.appendStaticHeader(Http2Frame::StaticHeaderIndex::MethodGet);
+  setup_frame.appendStaticHeader(Http2Frame::StaticHeaderIndex::SchemeHttps);
+  setup_frame.appendHeaderWithoutIndexing(Http2Frame::StaticHeaderIndex::Path, "/content");
+  setup_frame.appendHeaderWithoutIndexing(Http2Frame::StaticHeaderIndex::Authority, "localhost");
+  setup_frame.appendHeaderWithIncrementalIndexing(static_cast<Http2Frame::StaticHeaderIndex>(32), "session=" + std::string(1024, 'X'));
+  setup_frame.adjustPayloadSize();
+  sendFrame(setup_frame);
+
+  // Stream 3: Bomb stream (references cookie many times).
+  const uint32_t bomb_stream_id = Http2Frame::makeClientStreamId(1);
+  uint8_t bomb_flags = orFlags(Http2Frame::HeadersFlags::EndHeaders,
+                               Http2Frame::HeadersFlags::EndStream);
+  auto bomb_frame = Http2Frame::makeEmptyHeadersFrame(bomb_stream_id, static_cast<Http2Frame::HeadersFlags>(bomb_flags));
+  bomb_frame.appendStaticHeader(Http2Frame::StaticHeaderIndex::MethodGet);
+  bomb_frame.appendStaticHeader(Http2Frame::StaticHeaderIndex::SchemeHttps);
+  bomb_frame.appendHeaderWithoutIndexing(Http2Frame::StaticHeaderIndex::Path, "/content");
+  bomb_frame.appendHeaderWithoutIndexing(Http2Frame::StaticHeaderIndex::Authority, "localhost");
+
+  const int num_references = max_headers_kb * 6;
+  for (int i = 0; i < num_references; i++) {
+    bomb_frame.appendIndexedHeader(62);
+  }
+  bomb_frame.adjustPayloadSize();
+  sendFrame(bomb_frame);
+
+  // Stream 5: Valid request after the bomb stream. Only the bomb stream is reset but the connection remains open.
+  const uint32_t valid_stream_id = Http2Frame::makeClientStreamId(2);
+  auto valid_frame = Http2Frame::makeRequest(valid_stream_id, "localhost", "/");
+  sendFrame(valid_frame);
+
+  bool stream_3_reset = false;
+  bool stream_5_success = false;
+  for (int i = 0; i < 20; i++) {
+    auto frame = readFrame();
+    if (frame.streamId() == bomb_stream_id && frame.type() == Http2Frame::Type::RstStream) {
+      stream_3_reset = true;
+    }
+    if (frame.streamId() == valid_stream_id && frame.type() == Http2Frame::Type::Headers) {
+      stream_5_success = true;
+    }
+  }
+  
+  EXPECT_TRUE(stream_3_reset);
+  EXPECT_TRUE(stream_5_success);
+  
+  EXPECT_EQ(1, test_server_->counter("http2.header_list_size_too_large")->value());
+  EXPECT_THAT(waitForAccessLog(access_log_name_), HasSubstr("http2.header_list_size_too_large"));
+}
+
 } // namespace Envoy
