@@ -96,6 +96,74 @@ TEST_F(HttpConnectionManagerImplTest, HeaderOnlyRequestAndResponse) {
   EXPECT_EQ(1U, listener_stats_.downstream_rq_completed_.value());
 }
 
+TEST_F(HttpConnectionManagerImplTest, DoubleDeferredStreamDestroyCrash) {
+  setup();
+
+  std::shared_ptr<MockStreamDecoderFilter> filter(
+      new NiceMock<MockStreamDecoderFilter>());
+
+  EXPECT_CALL(*filter, decodeHeaders(_, true))
+      .Times(1)
+      .WillOnce(Invoke([&](RequestHeaderMap&, bool) -> FilterHeadersStatus {
+        // simulate Envoy rejecting this stream for whatever reason.
+        filter->callbacks_->sendLocalReply(Code::BadRequest, "body1", nullptr,
+                                           absl::nullopt, "details1");
+        return FilterHeadersStatus::StopIteration;
+      }));
+
+  EXPECT_CALL(*filter, setDecoderFilterCallbacks(_)).Times(1);
+
+  EXPECT_CALL(filter_factory_, createFilterChain(_))
+      .Times(1)
+      .WillOnce(Invoke([&](FilterChainFactoryCallbacks& callbacks) -> bool {
+        auto factory = createDecoderFilterFactoryCb(filter);
+        callbacks.setFilterConfigName("");
+        factory(callbacks);
+        return true;
+      }));
+
+  EXPECT_CALL(filter_callbacks_.connection_.dispatcher_, deferredDelete_(_))
+      .Times(1);
+
+  // Expectations for sendLocalReply
+  EXPECT_CALL(response_encoder_, encodeHeaders(_, false)).Times(1);
+  EXPECT_CALL(response_encoder_, encodeData(_, true)).Times(1);
+
+  EXPECT_CALL(*codec_, dispatch(_))
+      .Times(1)
+      .WillOnce(Invoke([&](Buffer::Instance& data) -> Http::Status {
+        decoder_ = &conn_manager_->newStream(response_encoder_);
+        RequestHeaderMapPtr headers{new TestRequestHeaderMapImpl{
+            {":authority", "host"}, {":path", "/"}, {":method", "GET"}}};
+        decoder_->decodeHeaders(std::move(headers), true);
+
+        // Get the callback pointer NOW while it is still registered!
+        EXPECT_FALSE(response_encoder_.stream_.callbacks_.empty());
+        StreamCallbacks* callback_ptr = nullptr;
+        for (auto* callback : response_encoder_.stream_.callbacks_) {
+          if (callback) {
+            callback_ptr = callback;
+            break;
+          }
+        }
+        EXPECT_NE(callback_ptr, nullptr);
+
+        // Now simulate codec completing encode. This should promote zombie and
+        // destroy it.
+        response_encoder_.stream_.codec_callbacks_->onCodecEncodeComplete();
+
+        // Now simulate a reset from codec! Call onResetStream on the saved
+        // callback pointer.
+        callback_ptr->onResetStream(StreamResetReason::RemoteReset, "");
+
+        data.drain(4);
+        return Http::okStatus();
+      }));
+
+  Buffer::OwnedImpl fake_input("1234");
+  conn_manager_->onData(fake_input, false);
+}
+
 // Similar to HeaderOnlyRequestAndResponse but uses newStreamHandle and has
 // lifetime checks.
 TEST_F(HttpConnectionManagerImplTest, HandleLifetime) {

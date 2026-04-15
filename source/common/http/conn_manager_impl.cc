@@ -318,6 +318,12 @@ void ConnectionManagerImpl::doEndStream(ActiveStream& stream, bool check_for_def
 }
 
 void ConnectionManagerImpl::doDeferredStreamDestroy(ActiveStream& stream) {
+  if (stream.filter_manager_.destroyed()) {
+    // If this stream has already been destroyed due to local reply from a
+    // filter, don't attempt to destroy it again.
+    return;
+  }
+
   if (!stream.state_.is_internally_destroyed_) {
     ++closed_non_internally_destroyed_requests_;
     if (isPrematureRstStream(stream)) {
